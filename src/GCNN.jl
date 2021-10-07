@@ -1,5 +1,7 @@
 module GCNN
 
+export RotGroupConv
+
 using Flux
 using Flux: conv, convfilter, glorot_uniform, @functor
 using SparseArrays
@@ -83,7 +85,6 @@ function RotGroup(
 end
 
 
-
 """
 Apply each rotation matrix to an array w of shape [width, height, in_channels, out_channels]
 produces a vector of rotated arrays each of the same shape.
@@ -95,20 +96,23 @@ function (rg::RotGroup)(w::AbstractArray{T,4}) where {T}
 end
 
 
+Base.length(rg::RotGroup) = length(rg.Rs)
+
+
     
 """
 Group convolutional layer lifting Z2 to SE2N with N orientations.
 """
-struct RotGroupLiftingConv{F, WT<:AbstractArray, RT<:AbstractSparseMatrix}
+struct RotGroupConv{F, WT<:AbstractArray, RT<:AbstractSparseMatrix}
     σ::F
     weight::WT
     rg::RotGroup{RT}
 end
 
-@functor RotGroupLiftingConv
+@functor RotGroupConv
 
 
-function RotGroupLiftingConv(
+function RotGroupConv(
         nrots::Integer, k::Integer, ch::Pair{<:Integer,<:Integer}, σ=identity;
         init=glorot_uniform, use_bias::Bool=true)
 
@@ -116,29 +120,35 @@ function RotGroupLiftingConv(
     # bias = create_bias(weght, use_bias, size(weight, N))
     rg = RotGroup(k, k, nrots)
 
-    return RotGroupLiftingConv(σ, weight, rg)
+    return RotGroupConv(σ, weight, rg)
 end
 
 
-function (lyr::RotGroupLiftingConv)(x::AbstractArray)
+"""
+Rotation group convolution applied to an array with shape [width, height, in_channels, batches] and
+producing an array of shape [width, height, out_channels, batches, nrotations].
+"""
+function (lyr::RotGroupConv)(x::AbstractArray{T,4}) where {T}
     # Rotate the weights according to each rotation matrix, apply each matrix, then concatenate.
     return cat([expand_dims(lyr.σ.(conv(x, Rw))) for Rw in lyr.rg(lyr.weight)]..., dims=5)
 end
 
 
-struct RotGroupConv{F, WT<:AbstractArray, RT<:AbstractSparseArray}
-    σ::F
-    weight::WT
-    Rs::Vector{RT}
+"""
+Rotation group convolution applied to an array with shape [width, height,
+in_channels, batches, nrotations] and producing an array of shape [width,
+height, out_channels, batches, nrotations].
+"""
+function (lyr::RotGroupConv)(x::AbstractArray{T,5}) where {T}
+    nrots = length(lyr.rg)
+    @assert size(x, 5) == nrots
+
+    Rws = lyr.rg(lyr.weight)
+    Rxs = [view(x, :, :, :, :, i) for i in 1:nrots]
+
+    #return cat([expand_dims(lyr.σ.(conv(Rx, Rw))) for (Rx, Rw) in zip(Rxs, Rws)]..., dims=5)
+    return cat([expand_dims(lyr.σ.(conv(Rxs[k], Rws[k]))) for k in 1:nrots]..., dims=5)
 end
-
-
-function RotGroupConv()
-    # TODO:
-end
-
-
-
 
 
 end # module

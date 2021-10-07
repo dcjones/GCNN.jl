@@ -112,13 +112,20 @@ end
 @functor RotGroupConv
 
 
+"""
+    RotGroupConv(nrots, filter, in => out, σ = identity)
+
+Construct a Group CNN (G-CNN) layer with `nrots` equally spaced rotations, and
+a `(filter, filter)` convolution kernel, with `in` input channels and `out`
+output channels, with an optional elementwise nonlinearity `σ`.
+"""
 function RotGroupConv(
-        nrots::Integer, k::Integer, ch::Pair{<:Integer,<:Integer}, σ=identity;
+        nrots::Integer, filter::Integer, ch::Pair{<:Integer,<:Integer}, σ=identity;
         init=glorot_uniform, use_bias::Bool=true)
 
-    weight = convfilter((k,k), ch; init)
+    weight = convfilter((filter, filter), ch; init)
     # bias = create_bias(weght, use_bias, size(weight, N))
-    rg = RotGroup(k, k, nrots)
+    rg = RotGroup(filter, filter, nrots)
 
     return RotGroupConv(σ, weight, rg)
 end
@@ -135,9 +142,9 @@ end
 
 
 """
-Rotation group convolution applied to an array with shape [width, height,
-in_channels, batches, nrotations] and producing an array of shape [width,
-height, out_channels, batches, nrotations].
+Rotation group convolution applied to an array with shape `[width, height,
+in_channels, batches, nrotations]` and producing an array of shape `[width,
+height, out_channels, batches, nrotations]`.
 """
 function (lyr::RotGroupConv)(x::AbstractArray{T,5}) where {T}
     nrots = length(lyr.rg)
@@ -146,7 +153,9 @@ function (lyr::RotGroupConv)(x::AbstractArray{T,5}) where {T}
     Rws = lyr.rg(lyr.weight)
     Rxs = [view(x, :, :, :, :, i) for i in 1:nrots]
 
+    # gradients don't work with zip
     #return cat([expand_dims(lyr.σ.(conv(Rx, Rw))) for (Rx, Rw) in zip(Rxs, Rws)]..., dims=5)
+
     return cat([expand_dims(lyr.σ.(conv(Rxs[k], Rws[k]))) for k in 1:nrots]..., dims=5)
 end
 

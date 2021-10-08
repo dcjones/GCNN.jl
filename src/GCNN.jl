@@ -4,7 +4,6 @@ export RotGroupConv, RotGroupConvTranspose
 
 using Flux
 using Flux: conv, ∇conv_data, convfilter, glorot_uniform, @functor, DenseConvDims
-using SparseArrays
 
 
 
@@ -17,7 +16,7 @@ expand_dims(x) = reshape(x, size(x)..., 1)
 """
 A conveniently bundled group of rotation matrices.
 """
-struct RotGroup{RT<:AbstractSparseMatrix}
+struct RotGroup{RT<:AbstractMatrix}
     Rs::Vector{RT}
 end
 
@@ -39,15 +38,13 @@ function RotGroup(
     ci, cj = div(m, 2)+1, div(n, 2)+1
     c = min(ci, cj)
 
-    Rs = Vector{SparseMatrixCSC{Float32, Int32}}(undef, nrots)
+    Rs = Vector{Matrix{Float32}}(undef, nrots)
 
     for (r, θ) in enumerate(range(0, periodicity, length=nrots+1)[1:end-1])
         cosθ, sinθ = cos(θ), sin(θ)
 
         # COO sparse matrix values
-        Is = Int32[]
-        Js = Int32[]
-        Vs = Float32[]
+        R = zeros(Float32, (m*n, m*n))
 
         for i in 1:m, j in 1:n
             if mask_disk && (i-ci)^2 + (j-cj)^2 > (c+0.5)^2
@@ -72,14 +69,12 @@ function RotGroup(
 
             for (irk, wik) in [(ir1, 1-wi), (ir2, wi)], (jrk, wjk) in [(jr1, 1-wj), (jr2, wj)]
                 if 1 <= irk <= m && 1 <= jrk <= n
-                    push!(Vs, wik * wjk)
                     l_output = (jrk-1)*m + irk
-                    push!(Is, l_output)
-                    push!(Js, l_input)
+                    R[l_output, l_input] = wik * wjk
                 end
             end
 
-            Rs[r] = SparseMatrixCSC(sparse(Is, Js, Vs, m*n, m*n))
+            Rs[r] = R
         end
     end
 
@@ -108,7 +103,7 @@ Base.length(rg::RotGroup) = length(rg.Rs)
 """
 Group convolutional layer.
 """
-struct RotGroupConv{F, WT<:AbstractArray, BT, RT<:AbstractSparseMatrix, M, N}
+struct RotGroupConv{F, WT<:AbstractArray, BT, RT<:AbstractMatrix, M, N}
     rg::RotGroup{RT}
     weight::WT
     bias::BT
@@ -189,7 +184,7 @@ end
 """
 Group transposed convolutional layer.
 """
-struct RotGroupConvTranspose{F, WT<:AbstractArray, BT, RT<:AbstractSparseMatrix, M, N}
+struct RotGroupConvTranspose{F, WT<:AbstractArray, BT, RT<:AbstractMatrix, M, N}
     rg::RotGroup{RT}
     weight::WT
     bias::BT

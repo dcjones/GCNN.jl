@@ -81,6 +81,9 @@ function RotGroup(
         end
     end
 
+    # TODO: It's probably better to use dense matrices since these will be
+    # small. (E.g. to rotate a 5x5 rotation kernel, we only need a 25x25 matrix).
+
     return RotGroup(Rs)
 end
 
@@ -107,6 +110,7 @@ struct RotGroupConv{F, WT<:AbstractArray, RT<:AbstractSparseMatrix}
     σ::F
     weight::WT
     rg::RotGroup{RT}
+    stride::Int
 end
 
 @functor RotGroupConv
@@ -121,13 +125,13 @@ output channels, with an optional elementwise nonlinearity `σ`.
 """
 function RotGroupConv(
         nrots::Integer, filter::Integer, ch::Pair{<:Integer,<:Integer}, σ=identity;
-        init=glorot_uniform, use_bias::Bool=true)
+        init=glorot_uniform, stride::Int=1, use_bias::Bool=true)
 
     weight = convfilter((filter, filter), ch; init)
     # bias = create_bias(weght, use_bias, size(weight, N))
     rg = RotGroup(filter, filter, nrots)
 
-    return RotGroupConv(σ, weight, rg)
+    return RotGroupConv(σ, weight, rg, stride)
 end
 
 
@@ -137,7 +141,7 @@ producing an array of shape [width, height, out_channels, batches, nrotations].
 """
 function (lyr::RotGroupConv)(x::AbstractArray{T,4}) where {T}
     # Rotate the weights according to each rotation matrix, apply each matrix, then concatenate.
-    return cat([expand_dims(lyr.σ.(conv(x, Rw))) for Rw in lyr.rg(lyr.weight)]..., dims=5)
+    return cat([expand_dims(lyr.σ.(conv(x, Rw, stride=lyr.stride))) for Rw in lyr.rg(lyr.weight)]..., dims=5)
 end
 
 
@@ -156,7 +160,7 @@ function (lyr::RotGroupConv)(x::AbstractArray{T,5}) where {T}
     # gradients don't work with zip
     #return cat([expand_dims(lyr.σ.(conv(Rx, Rw))) for (Rx, Rw) in zip(Rxs, Rws)]..., dims=5)
 
-    return cat([expand_dims(lyr.σ.(conv(Rxs[k], Rws[k]))) for k in 1:nrots]..., dims=5)
+    return cat([expand_dims(lyr.σ.(conv(Rxs[k], Rws[k], stride=lyr.stride))) for k in 1:nrots]..., dims=5)
 end
 
 

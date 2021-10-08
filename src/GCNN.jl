@@ -7,8 +7,6 @@ using Flux: conv, ∇conv_data, convfilter, glorot_uniform, @functor, DenseConvD
 using SparseArrays
 
 
-# TODO:
-#   Add bias to layers. (Does this need to be rotated along with weights?)
 
 """
 Add an extra dimension to the end of an array.
@@ -110,11 +108,14 @@ Base.length(rg::RotGroup) = length(rg.Rs)
 """
 Group convolutional layer.
 """
-struct RotGroupConv{F, WT<:AbstractArray, RT<:AbstractSparseMatrix}
-    σ::F
-    weight::WT
+struct RotGroupConv{F, WT<:AbstractArray, BT, RT<:AbstractSparseMatrix, M, N}
     rg::RotGroup{RT}
-    stride::Int
+    weight::WT
+    bias::BT
+    σ::F
+    stride::NTuple{N,Int}
+    pad::NTuple{M,Int}
+    dilation::NTuple{N,Int}
 end
 
 @functor RotGroupConv
@@ -129,13 +130,24 @@ output channels, with an optional elementwise nonlinearity `σ`.
 """
 function RotGroupConv(
         nrots::Integer, filter::Integer, ch::Pair{<:Integer,<:Integer}, σ=identity;
-        init=glorot_uniform, stride::Int=1, use_bias::Bool=true)
+        init=glorot_uniform, stride::Int=1, pad=0, dilation=1, use_bias::Bool=true)
 
     weight = convfilter((filter, filter), ch; init)
     # bias = create_bias(weght, use_bias, size(weight, N))
     rg = RotGroup(filter, filter, nrots)
 
-    return RotGroupConv(σ, weight, rg, stride)
+    return RotGroupConv(rg, weight, σ, stride, pad, dilation, use_bias)
+end
+
+
+function RotGroupConv(
+        rg::RotGroup, weight::AbstractArray{T, N}, σ, stride, pad, dilation, use_bias) where {T, N}
+
+    stride = Flux.expand(Val(N-2), stride)
+    dilation = Flux.expand(Val(N-2), dilation)
+    pad = Flux.calc_padding(Conv, pad, size(weight)[1:N-2], dilation, stride)
+    bias = Flux.create_bias(weight, use_bias, size(weight, N))
+    return RotGroupConv(rg, weight, bias, σ, stride, pad, dilation)
 end
 
 
@@ -145,7 +157,9 @@ producing an array of shape [width, height, out_channels, batches, nrotations].
 """
 function (lyr::RotGroupConv)(x::AbstractArray{T,4}) where {T}
     # Rotate the weights according to each rotation matrix, apply each matrix, then concatenate.
-    return cat([expand_dims(lyr.σ.(conv(x, Rw, stride=lyr.stride))) for Rw in lyr.rg(lyr.weight)]..., dims=5)
+    bias = reshape(lyr.bias, ntuple(_ -> 1, length(lyr.stride))..., :, 1)
+    cdims = DenseConvDims(x, lyr.weight; stride=lyr.stride, padding=lyr.pad, dilation=lyr.dilation)
+    return cat([expand_dims(lyr.σ.(conv(x, Rw, cdims) .+ bias)) for Rw in lyr.rg(lyr.weight)]..., dims=5)
 end
 
 
@@ -155,8 +169,12 @@ in_channels, batches, nrotations]` and producing an array of shape `[width,
 height, out_channels, batches, nrotations]`.
 """
 function (lyr::RotGroupConv)(x::AbstractArray{T,5}) where {T}
+    # TODO:
     nrots = length(lyr.rg)
     @assert size(x, 5) == nrots
+
+    bias = reshape(lyr.bias, ntuple(_ -> 1, length(lyr.stride))..., :, 1)
+    cdims = DenseConvDims(size(x)[1:end-1], size(lyr.weight); stride=lyr.stride, padding=lyr.pad, dilation=lyr.dilation)
 
     Rws = lyr.rg(lyr.weight)
     Rxs = [view(x, :, :, :, :, i) for i in 1:nrots]
@@ -164,18 +182,20 @@ function (lyr::RotGroupConv)(x::AbstractArray{T,5}) where {T}
     # gradients don't work with zip
     #return cat([expand_dims(lyr.σ.(conv(Rx, Rw))) for (Rx, Rw) in zip(Rxs, Rws)]..., dims=5)
 
-    return cat([expand_dims(lyr.σ.(conv(Rxs[k], Rws[k], stride=lyr.stride))) for k in 1:nrots]..., dims=5)
+    return cat([expand_dims(lyr.σ.(conv(Rxs[k], Rws[k], cdims) .+ bias)) for k in 1:nrots]..., dims=5)
 end
 
 
 """
 Group transposed convolutional layer.
 """
-struct RotGroupConvTranspose{F, WT<:AbstractArray, RT<:AbstractSparseMatrix, M, N}
+struct RotGroupConvTranspose{F, WT<:AbstractArray, BT, RT<:AbstractSparseMatrix, M, N}
     rg::RotGroup{RT}
     weight::WT
+    bias::BT
     σ::F
-    stride::Int
+    # TODO: Make this a tuple so everythig works.
+    stride::NTuple{N,Int}
     pad::NTuple{M,Int}
     dilation::NTuple{N,Int}
 end
@@ -200,15 +220,17 @@ function RotGroupConvTranspose(
     # bias = create_bias(weght, use_bias, size(weight, N))
     rg = RotGroup(filter, filter, nrots)
 
-    return RotGroupConvTranspose(rg, weight, σ, stride, pad, dilation)
+    return RotGroupConvTranspose(rg, weight, σ, stride, pad, dilation, use_bias)
 end
 
 
 function RotGroupConvTranspose(
-        rg::RotGroup, weight::AbstractArray{T, N}, σ, stride, pad, dilation) where {T, N}
+        rg::RotGroup, weight::AbstractArray{T, N}, σ, stride, pad, dilation, use_bias) where {T, N}
+    stride = Flux.expand(Val(N-2), stride)
     dilation = Flux.expand(Val(N-2), dilation)
     pad = Flux.calc_padding(ConvTranspose, pad, size(weight)[1:N-2], dilation, stride)
-    return RotGroupConvTranspose(rg, weight, σ, stride, pad, dilation)
+    bias = Flux.create_bias(weight, use_bias, size(weight, N-1))
+    return RotGroupConvTranspose(rg, weight, bias, σ, stride, pad, dilation)
 end
 
 
@@ -235,7 +257,10 @@ out_channels, batches, nrotations].
 function (lyr::RotGroupConvTranspose)(x::AbstractArray{T,4}) where {T}
     # Rotate the weights according to each rotation matrix, apply each matrix, then concatenate.
     cdims = conv_transpose_dims(lyr, size(x))
-    return cat([expand_dims(lyr.σ.(∇conv_data(x, Rw, cdims))) for Rw in lyr.rg(lyr.weight)]..., dims=5)
+    bias = reshape(lyr.bias, map(_->1, lyr.stride)..., :, 1)
+
+    # return cat([expand_dims(lyr.σ.(∇conv_data(x, Rw, cdims) .+ lyr.bias)) for Rw in lyr.rg(lyr.weight)]..., dims=5)
+    return cat([expand_dims(lyr.σ.(∇conv_data(x, Rw, cdims) .+ bias)) for Rw in lyr.rg(lyr.weight)]..., dims=5)
 end
 
 
@@ -251,11 +276,12 @@ function (lyr::RotGroupConvTranspose)(x::AbstractArray{T,5}) where {T}
     Rws = lyr.rg(lyr.weight)
     Rxs = [view(x, :, :, :, :, i) for i in 1:nrots]
     cdims = conv_transpose_dims(lyr, size(x)[1:end-1])
+    bias = reshape(lyr.bias, map(_->1, lyr.stride)..., :, 1)
 
     # gradients don't work with zip
     #return cat([expand_dims(lyr.σ.(conv(Rx, Rw))) for (Rx, Rw) in zip(Rxs, Rws)]..., dims=5)
 
-    return cat([expand_dims(lyr.σ.(∇conv_data(Rxs[k], Rws[k], cdims))) for k in 1:nrots]..., dims=5)
+    return cat([expand_dims(lyr.σ.(∇conv_data(Rxs[k], Rws[k], cdims) .+ bias)) for k in 1:nrots]..., dims=5)
 end
 
 
